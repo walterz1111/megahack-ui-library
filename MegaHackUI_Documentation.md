@@ -27,13 +27,19 @@ The UI matches the Geometry Dash MegaHack v7/v8 theme (sampled from Eclipse Menu
 
 ## 2. Loading the Library
 
-### Option A: From Executor Workspace (Recommended)
+### Option A: From GitHub Repository (Recommended)
+Load directly online without needing local files:
+```lua
+local MegaHack = loadstring(game:HttpGet("https://raw.githubusercontent.com/walterz1111/megahack-ui-library/refs/heads/main/MegaHackUI.luau"))()
+```
+
+### Option B: From Executor Workspace
 Place `MegaHackUI.luau` in your executor's `workspace` folder:
 ```lua
 local MegaHack = loadfile("MegaHackUI.luau")()
 ```
 
-### Option B: Embedded
+### Option C: Embedded
 Or paste the entire contents of `MegaHackUI.luau` directly at the top of your script.
 
 ---
