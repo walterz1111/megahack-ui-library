@@ -35,13 +35,58 @@ end
 local MegaHackLib = {}
 MegaHackLib.__index = MegaHackLib
 
--- Exact color scheme sampled directly from Eclipse Menu megahack.json & megahack.cpp
+-- Custom TTF Font loader for genuine Poppins font (from Google Fonts / Eclipse Menu)
+local function loadPoppinsFont()
+    local getasset = getcustomasset or get_custom_asset
+    if getasset and writefile and isfile and game and game.HttpGet then
+        local ok, err = pcall(function()
+            if not isfile("Poppins-Regular.ttf") then
+                local regTtf = game:HttpGet("https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-Regular.ttf")
+                writefile("Poppins-Regular.ttf", regTtf)
+            end
+            if not isfile("Poppins-Bold.ttf") then
+                local boldTtf = game:HttpGet("https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-Bold.ttf")
+                writefile("Poppins-Bold.ttf", boldTtf)
+            end
+
+            local regAsset = getasset("Poppins-Regular.ttf")
+            local boldAsset = getasset("Poppins-Bold.ttf")
+
+            local jsonContent = string.format([[{
+              "name": "PoppinsCustomTTF",
+              "faces": [
+                { "name": "Regular", "weight": 400, "style": "normal", "assetId": "%s" },
+                { "name": "Bold", "weight": 700, "style": "normal", "assetId": "%s" }
+              ]
+            }]], regAsset, boldAsset)
+
+            writefile("PoppinsCustomTTF.json", jsonContent)
+            local jsonAsset = getasset("PoppinsCustomTTF.json")
+
+            return Font.new(jsonAsset, Enum.FontWeight.Regular), Font.new(jsonAsset, Enum.FontWeight.Bold)
+        end)
+
+        if ok and err then
+            local fReg, fBold = err, select(2, pcall(function()
+                return Font.new(getasset("PoppinsCustomTTF.json"), Enum.FontWeight.Bold)
+            end))
+            return fReg, fBold or fReg
+        end
+    end
+    -- Fallback to engine Poppins / FredokaOne
+    return Font.new("rbxasset://fonts/families/Poppins.json", Enum.FontWeight.Regular),
+           Font.new("rbxasset://fonts/families/Poppins.json", Enum.FontWeight.Bold)
+end
+
+local FONT_REGULAR, FONT_BOLD = loadPoppinsFont()
+local FONT_MEDIUM = FONT_REGULAR
+
 local THEME = {
     TitleBg = Color3.fromRGB(235, 47, 100),         -- #EB2F64 MegaHack Signature Pink
     TitleText = Color3.fromRGB(255, 255, 255),
     WindowBg = Color3.fromRGB(41, 41, 41),          -- 292929FF from megahack.json
     WindowBorder = Color3.fromRGB(0, 0, 0),         -- 000000FF
-    PopupBg = Color3.fromRGB(34, 34, 34),           -- Dark popup background
+    PopupBg = Color3.fromRGB(25, 25, 25),           -- Darker popup background for contrast
     
     ItemNormalBg = Color3.fromRGB(41, 41, 41),
     ItemHoverBg = Color3.fromRGB(54, 54, 54),       -- Hover highlight
@@ -60,8 +105,14 @@ local THEME = {
     ScrollBarTrack = Color3.fromRGB(25, 25, 25),
     ScrollBarThumb = Color3.fromRGB(130, 130, 130),
     
-    Font = Enum.Font.SourceSans,
-    FontBold = Enum.Font.SourceSansBold,
+    -- Legacy Enum.Font kept for compatibility fallback
+    Font = Enum.Font.GothamMedium,
+    FontBold = Enum.Font.GothamBold,
+    
+    -- FontFace objects (Genuine Poppins TTF)
+    FontFace = FONT_REGULAR,
+    FontFaceMedium = FONT_MEDIUM,
+    FontFaceBold = FONT_BOLD,
     
     HeaderHeight = 22,
     RowHeight = 21,
@@ -69,7 +120,11 @@ local THEME = {
     HeaderSize = 14,
 }
 
-local function makeDraggable(header, frame, getScaleFunc)
+local POPUP_BG = Color3.fromRGB(30, 30, 30)
+local POPUP_HOVER = Color3.fromRGB(42, 42, 42)
+local POPUP_TEXT = Color3.fromRGB(220, 220, 220)
+
+local function makeDraggable(header, frame, getScaleFunc, onDragCallback)
     local dragging = false
     local dragStart, startPos
     header.InputBegan:Connect(function(input)
@@ -87,6 +142,9 @@ local function makeDraggable(header, frame, getScaleFunc)
             local scale = (getScaleFunc and getScaleFunc()) or 1.0
             local delta = (input.Position - dragStart) / scale
             frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            if onDragCallback then
+                onDragCallback()
+            end
         end
     end)
 end
@@ -102,6 +160,7 @@ function MegaHackLib:CreateGroup(options)
     ScreenGui.Name = "MegaHackUI_Master"
     ScreenGui.ResetOnSpawn = false
     ScreenGui.DisplayOrder = 9999
+    ScreenGui.IgnoreGuiInset = true
     ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     ScreenGui.Parent = p
 
@@ -130,6 +189,9 @@ function MegaHackLib:CreateGroup(options)
         Windows = {},
         ActiveDropdown = nil,
         ActiveComboBtn = nil,
+        ActivePopup = nil,
+        _nextZ = 10,
+        _windowLayers = {},
     }
 
     function Group:SetScale(scale)
@@ -147,6 +209,34 @@ function MegaHackLib:CreateGroup(options)
             self.ActiveDropdown.Visible = false
             self.ActiveDropdown = nil
             self.ActiveComboBtn = nil
+        end
+    end
+
+    function Group:CloseActivePopup()
+        if self.ActivePopup then
+            self.ActivePopup.Visible = false
+            self.ActivePopup = nil
+        end
+    end
+
+    function Group:_bumpZ(frame)
+        self._nextZ = self._nextZ + 10
+        frame.ZIndex = self._nextZ
+        -- also bump its Body/Header if they have fixed ZIndex? No, they are children with lower ZIndex relative
+        return self._nextZ
+    end
+
+    function Group:BringToFront(win)
+        local z = self:_bumpZ(win.Frame)
+        -- keep its popup on same layer (just above window)
+        for _, pf in ipairs(win.Popups or {}) do
+            if pf and pf.Parent then
+                pf.ZIndex = z + 1
+            end
+        end
+        -- also ensure dropdowns stay on top of everything
+        if self.ActiveDropdown then
+            self.ActiveDropdown.ZIndex = self._nextZ + 5
         end
     end
 
@@ -170,17 +260,16 @@ function MegaHackLib:CreateGroup(options)
     function Group:CreateWindow(winOptions)
         winOptions = winOptions or {}
         local title = winOptions.Title or "Window"
-        local position = winOptions.Position or UDim2.new(0, 10, 0, 10)
-        local width = winOptions.Width or 205
+        local position = winOptions.Position or UDim2.new(0, 10, 0, 0)
+        local width = winOptions.Width or 185
         local maxHeight = winOptions.MaxHeight or 320
 
         local Frame = Instance.new("Frame")
         Frame.Name = title .. "_Window"
         Frame.Position = position
         Frame.Size = UDim2.new(0, width, 0, THEME.HeaderHeight)
-        Frame.BackgroundColor3 = THEME.WindowBorder
-        Frame.BorderSizePixel = 1
-        Frame.BorderColor3 = THEME.WindowBorder
+        Frame.BackgroundColor3 = THEME.WindowBg
+        Frame.BorderSizePixel = 0
         Frame.Parent = ScreenGui
 
         -- Header Bar
@@ -191,14 +280,14 @@ function MegaHackLib:CreateGroup(options)
         Header.BorderSizePixel = 0
         Header.Parent = Frame
 
-        -- Eclipse collapse icon '—' / '+' on the left
+        -- Eclipse collapse icon 'â€”' / '+' on the left
         local ArrowBtn = Instance.new("TextButton")
         ArrowBtn.Name = "ArrowBtn"
         ArrowBtn.Size = UDim2.new(0, 18, 1, 0)
         ArrowBtn.Position = UDim2.new(0, 2, 0, 0)
         ArrowBtn.BackgroundTransparency = 1
         ArrowBtn.Text = "—"
-        ArrowBtn.Font = THEME.FontBold
+        ArrowBtn.FontFace = THEME.FontFaceBold
         ArrowBtn.TextSize = 12
         ArrowBtn.TextColor3 = THEME.TitleText
         ArrowBtn.Active = false
@@ -211,7 +300,7 @@ function MegaHackLib:CreateGroup(options)
         TitleLabel.Size = UDim2.new(1, -26, 1, 0)
         TitleLabel.Position = UDim2.new(0, 13, 0, 0)
         TitleLabel.BackgroundTransparency = 1
-        TitleLabel.Font = THEME.FontBold
+        TitleLabel.FontFace = THEME.FontFaceBold
         TitleLabel.Text = title
         TitleLabel.TextSize = THEME.HeaderSize
         TitleLabel.TextColor3 = THEME.TitleText
@@ -267,12 +356,20 @@ function MegaHackLib:CreateGroup(options)
             updateSize()
         end)
 
-        makeDraggable(Header, Frame, function() return Group:GetScale() end)
+        local Window = {
+            Frame = Frame,
+            Body = Body,
+            Layout = Layout,
+            Width = width,
+            ScreenGui = ScreenGui,
+            Group = Group,
+            PopupUpdateFuncs = {},
+            Popups = {},
+        }
 
         -- Smooth mouse wheel scroll listener for Body
         UserInputService.InputChanged:Connect(function(input)
             if not isCollapsed and input.UserInputType == Enum.UserInputType.MouseWheel then
-                -- Do not scroll window if mouse is hovering over an active floating dropdown
                 if Group.ActiveDropdown and Group.ActiveDropdown.Visible and isMouseInGui(Group.ActiveDropdown) then
                     return
                 end
@@ -281,73 +378,92 @@ function MegaHackLib:CreateGroup(options)
                     if maxScroll > 0 then
                         local newY = math.clamp(Body.CanvasPosition.Y - input.Position.Z * 28, 0, maxScroll)
                         Body.CanvasPosition = Vector2.new(0, newY)
+                        for _, updateFn in ipairs(Window.PopupUpdateFuncs) do
+                            updateFn()
+                        end
                     end
                 end
             end
         end)
 
-        local Window = {
-            Frame = Frame,
-            Body = Body,
-            Layout = Layout,
-            Width = width,
-            ScreenGui = ScreenGui,
-            Group = Group,
-        }
+        -- initial Z layer
+        Group._nextZ = Group._nextZ + 10
+        Frame.ZIndex = Group._nextZ
 
-        -- Helper to create Settings Popup Window (for ToggleWithSettings)
-        local function createSettingsPopup(featureName, buildCallback, parentRow)
-            local popupW = 215
+        Header.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.MouseButton1 then
+                Group:BringToFront(Window)
+            end
+        end)
+
+        makeDraggable(Header, Frame, function() return Group:GetScale() end, function()
+            for _, updateFn in ipairs(Window.PopupUpdateFuncs) do
+                updateFn()
+            end
+        end)
+
+        -- Helper to create Settings Popup Window (for ToggleWithSettings and SettingsOnly)
+        local function createSettingsPopup(featureName, buildCallback, parentRow, hasHeader)
+            if hasHeader == nil then hasHeader = false end -- Default headerless as requested
+            local popupW = 185
             local popup = Instance.new("Frame")
             popup.Name = featureName .. "_SettingsPopup"
-            popup.Size = UDim2.new(0, popupW, 0, THEME.HeaderHeight)
-            popup.Position = UDim2.new(0, Frame.AbsolutePosition.X + width + 4, 0, Frame.AbsolutePosition.Y)
-            popup.BackgroundColor3 = THEME.WindowBorder
-            popup.BorderSizePixel = 1
-            popup.BorderColor3 = THEME.WindowBorder
-            popup.ZIndex = 500
+            popup.Size = UDim2.new(0, popupW, 0, 0)
+            popup.BackgroundColor3 = POPUP_BG
+            popup.BorderSizePixel = 0
+            popup.ZIndex = Frame.ZIndex + 1
             popup.Visible = false
             popup.Parent = ScreenGui
 
-            -- Header
-            local pHeader = Instance.new("Frame")
-            pHeader.Size = UDim2.new(1, 0, 0, THEME.HeaderHeight)
-            pHeader.BackgroundColor3 = THEME.TitleBg
-            pHeader.BorderSizePixel = 0
-            pHeader.ZIndex = 501
-            pHeader.Parent = popup
+            local headerHeightOffset = 0
 
-            local pTitle = Instance.new("TextLabel")
-            pTitle.Size = UDim2.new(1, -26, 1, 0)
-            pTitle.Position = UDim2.new(0, 8, 0, 0)
-            pTitle.BackgroundTransparency = 1
-            pTitle.Font = THEME.FontBold
-            pTitle.Text = featureName .. " Settings"
-            pTitle.TextSize = THEME.HeaderSize - 1
-            pTitle.TextColor3 = THEME.TitleText
-            pTitle.TextXAlignment = Enum.TextXAlignment.Left
-            pTitle.TextTruncate = Enum.TextTruncate.AtEnd
-            pTitle.ZIndex = 502
-            pTitle.Parent = pHeader
+            if hasHeader then
+                headerHeightOffset = THEME.HeaderHeight
+                local pHeader = Instance.new("Frame")
+                pHeader.Size = UDim2.new(1, 0, 0, THEME.HeaderHeight)
+                pHeader.BackgroundColor3 = THEME.TitleBg
+                pHeader.BorderSizePixel = 0
+                pHeader.ZIndex = 501
+                pHeader.Parent = popup
 
-            local closeBtn = Instance.new("TextButton")
-            closeBtn.Size = UDim2.new(0, 20, 1, 0)
-            closeBtn.Position = UDim2.new(1, -22, 0, 0)
-            closeBtn.BackgroundTransparency = 1
-            closeBtn.Text = "X"
-            closeBtn.Font = THEME.FontBold
-            closeBtn.TextSize = 12
-            closeBtn.TextColor3 = THEME.TitleText
-            closeBtn.Active = false
-            closeBtn.Selectable = false
-            closeBtn.ZIndex = 502
-            closeBtn.Parent = pHeader
+                local pTitle = Instance.new("TextLabel")
+                pTitle.Size = UDim2.new(1, -26, 1, 0)
+                pTitle.Position = UDim2.new(0, 8, 0, 0)
+                pTitle.BackgroundTransparency = 1
+                pTitle.FontFace = THEME.FontFaceBold
+                pTitle.Text = featureName .. " Settings"
+                pTitle.TextSize = THEME.HeaderSize - 1
+                pTitle.TextColor3 = THEME.TitleText
+                pTitle.TextXAlignment = Enum.TextXAlignment.Left
+                pTitle.TextTruncate = Enum.TextTruncate.AtEnd
+                pTitle.ZIndex = 502
+                pTitle.Parent = pHeader
+
+                local closeBtn = Instance.new("TextButton")
+                closeBtn.Size = UDim2.new(0, 20, 1, 0)
+                closeBtn.Position = UDim2.new(1, -22, 0, 0)
+                closeBtn.BackgroundTransparency = 1
+                closeBtn.Text = "X"
+                closeBtn.FontFace = THEME.FontFaceBold
+                closeBtn.TextSize = 12
+                closeBtn.TextColor3 = THEME.TitleText
+                closeBtn.Active = false
+                closeBtn.Selectable = false
+                closeBtn.ZIndex = 502
+                closeBtn.Parent = pHeader
+
+                closeBtn.MouseButton1Click:Connect(function()
+                    popup.Visible = false
+                end)
+
+                makeDraggable(pHeader, popup, function() return Group:GetScale() end)
+            end
 
             -- Content Body
             local pBody = Instance.new("ScrollingFrame")
-            pBody.Position = UDim2.new(0, 0, 0, THEME.HeaderHeight)
+            pBody.Position = UDim2.new(0, 0, 0, headerHeightOffset)
             pBody.Size = UDim2.new(1, 0, 0, 0)
-            pBody.BackgroundColor3 = THEME.PopupBg
+            pBody.BackgroundColor3 = POPUP_BG
             pBody.BorderSizePixel = 0
             pBody.ScrollBarThickness = 0
             pBody.ScrollBarImageTransparency = 1
@@ -371,10 +487,8 @@ function MegaHackLib:CreateGroup(options)
                 local fitH = math.min(h, 420)
                 pBody.Size = UDim2.new(1, 0, 0, fitH)
                 pBody.CanvasSize = UDim2.new(0, 0, 0, h + 2)
-                popup.Size = UDim2.new(0, popupW, 0, THEME.HeaderHeight + fitH)
+                popup.Size = UDim2.new(0, popupW, 0, headerHeightOffset + fitH)
             end)
-
-            makeDraggable(pHeader, popup, function() return Group:GetScale() end)
 
             -- Mousewheel for popup
             UserInputService.InputChanged:Connect(function(input)
@@ -392,12 +506,11 @@ function MegaHackLib:CreateGroup(options)
                 end
             end)
 
-            closeBtn.MouseButton1Click:Connect(function()
-                popup.Visible = false
-            end)
+
 
             -- The PopupObj forwards ALL calls to Window methods with self.Body = pBody!
             local PopupObj = {
+                IsPopup = true,
                 Frame = popup,
                 Body = pBody,
                 Layout = pLayout,
@@ -419,7 +532,7 @@ function MegaHackLib:CreateGroup(options)
             if buildCallback then
                 buildCallback(PopupObj)
             end
-
+            table.insert(Window.Popups, popup)
             return popup
         end
 
@@ -433,11 +546,12 @@ function MegaHackLib:CreateGroup(options)
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local btn = Instance.new("TextButton")
             btn.Name = name
             btn.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-            btn.BackgroundColor3 = THEME.ItemNormalBg
+            btn.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             btn.BorderSizePixel = 0
             btn.AutoButtonColor = false
             btn.Text = ""
@@ -450,10 +564,10 @@ function MegaHackLib:CreateGroup(options)
             lbl.Size = UDim2.new(1, -16, 1, 0)
             lbl.Position = UDim2.new(0, 6, 0, 0)
             lbl.BackgroundTransparency = 1
-            lbl.Font = THEME.Font
+            lbl.FontFace = THEME.FontFace
             lbl.Text = name
             lbl.TextSize = THEME.TextSize
-            lbl.TextColor3 = state and THEME.TextActive or THEME.TextDisabled
+            lbl.TextColor3 = isPopup and POPUP_TEXT or (state and THEME.TextActive or THEME.TextDisabled)
             lbl.TextXAlignment = Enum.TextXAlignment.Left
             lbl.TextTruncate = Enum.TextTruncate.AtEnd
             lbl.ZIndex = btn.ZIndex + 1
@@ -470,12 +584,12 @@ function MegaHackLib:CreateGroup(options)
             bar.Parent = btn
 
             local function refresh()
-                lbl.TextColor3 = state and THEME.TextActive or THEME.TextDisabled
+                lbl.TextColor3 = isPopup and POPUP_TEXT or (state and THEME.TextActive or THEME.TextDisabled)
                 bar.BackgroundColor3 = state and THEME.IndicatorActive or THEME.IndicatorDisabled
             end
 
-            btn.MouseEnter:Connect(function() btn.BackgroundColor3 = THEME.ItemHoverBg end)
-            btn.MouseLeave:Connect(function() btn.BackgroundColor3 = THEME.ItemNormalBg end)
+            btn.MouseEnter:Connect(function() btn.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+            btn.MouseLeave:Connect(function() btn.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
             btn.MouseButton1Click:Connect(function()
                 state = not state
                 refresh()
@@ -505,11 +619,12 @@ function MegaHackLib:CreateGroup(options)
             local buildSettings = opt.BuildSettings or function(p) end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local row = Instance.new("Frame")
             row.Name = name .. "_SettingsRow"
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
@@ -529,10 +644,10 @@ function MegaHackLib:CreateGroup(options)
             lbl.Size = UDim2.new(1, -6, 1, 0)
             lbl.Position = UDim2.new(0, 6, 0, 0)
             lbl.BackgroundTransparency = 1
-            lbl.Font = THEME.Font
+            lbl.FontFace = THEME.FontFace
             lbl.Text = name
             lbl.TextSize = THEME.TextSize
-            lbl.TextColor3 = state and THEME.TextActive or THEME.TextDisabled
+            lbl.TextColor3 = isPopup and POPUP_TEXT or (state and THEME.TextActive or THEME.TextDisabled)
             lbl.TextXAlignment = Enum.TextXAlignment.Left
             lbl.TextTruncate = Enum.TextTruncate.AtEnd
             lbl.ZIndex = toggleBtn.ZIndex + 1
@@ -547,7 +662,7 @@ function MegaHackLib:CreateGroup(options)
             arrowBtn.Text = "◢"
             arrowBtn.Font = Enum.Font.SourceSans
             arrowBtn.TextSize = 9
-            arrowBtn.TextColor3 = state and THEME.TextActive or THEME.TextDisabled
+            arrowBtn.TextColor3 = isPopup and POPUP_TEXT or (state and THEME.TextActive or THEME.TextDisabled)
             arrowBtn.Active = false
             arrowBtn.Selectable = false
             arrowBtn.ZIndex = row.ZIndex + 1
@@ -556,18 +671,18 @@ function MegaHackLib:CreateGroup(options)
             local popupInstance = createSettingsPopup(name, buildSettings, row)
 
             local function refresh()
-                lbl.TextColor3 = state and THEME.TextActive or THEME.TextDisabled
-                arrowBtn.TextColor3 = state and THEME.TextActive or THEME.TextDisabled
+                lbl.TextColor3 = isPopup and POPUP_TEXT or (state and THEME.TextActive or THEME.TextDisabled)
+                arrowBtn.TextColor3 = isPopup and POPUP_TEXT or (state and THEME.TextActive or THEME.TextDisabled)
             end
 
-            toggleBtn.MouseEnter:Connect(function() row.BackgroundColor3 = THEME.ItemHoverBg end)
-            toggleBtn.MouseLeave:Connect(function() row.BackgroundColor3 = THEME.ItemNormalBg end)
+            toggleBtn.MouseEnter:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+            toggleBtn.MouseLeave:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
             arrowBtn.MouseEnter:Connect(function()
-                row.BackgroundColor3 = THEME.ItemHoverBg
+                row.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg)
                 arrowBtn.BackgroundTransparency = 0.8
             end)
             arrowBtn.MouseLeave:Connect(function()
-                row.BackgroundColor3 = THEME.ItemNormalBg
+                row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
                 arrowBtn.BackgroundTransparency = 1
             end)
 
@@ -577,22 +692,54 @@ function MegaHackLib:CreateGroup(options)
                 callback(state)
             end)
 
+            local function updatePopupPosition()
+                if not popupInstance.Visible then return end
+                local curScale = Group:GetScale()
+                local cam = workspace.CurrentCamera
+                local scrW = cam and cam.ViewportSize.X or 1920
+                local scrH = cam and cam.ViewportSize.Y or 1080
+                
+                local popupW = 185
+                local guiAbs = ScreenGui.AbsolutePosition
+                local windowRightEdge = (Frame.AbsolutePosition.X - guiAbs.X + Frame.AbsoluteSize.X) / curScale
+                local windowLeftEdge = (Frame.AbsolutePosition.X - guiAbs.X) / curScale
+                
+                local posX = windowRightEdge
+                if (posX + popupW) * curScale > scrW - 10 then
+                    posX = windowLeftEdge - popupW
+                end
+                if posX < 5 then posX = 5 end
+                
+                local rowAbsY = (row.AbsolutePosition.Y - guiAbs.Y) / curScale
+                local posY = rowAbsY
+                local popupH = popupInstance.AbsoluteSize.Y / curScale
+                if popupH == 0 then
+                    popupH = popupInstance.Size.Y.Offset
+                end
+                if (posY + popupH) * curScale > scrH - 10 then
+                    posY = math.max(5, (scrH / curScale) - popupH - 10)
+                end
+                popupInstance.Position = UDim2.new(0, posX, 0, posY)
+            end
+
             arrowBtn.MouseButton1Click:Connect(function()
-                popupInstance.Visible = not popupInstance.Visible
-                if popupInstance.Visible then
-                    local curScale = Group:GetScale()
-                    local cam = workspace.CurrentCamera
-                    local scrW = cam and cam.ViewportSize.X or 1920
-                    local scrH = cam and cam.ViewportSize.Y or 1080
-                    local posX = (Frame.AbsolutePosition.X + Frame.AbsoluteSize.X + 6) / curScale
-                    if (posX + 215) * curScale > scrW - 10 then
-                        posX = (Frame.AbsolutePosition.X - 215 - 6) / curScale
+                Group:BringToFront(Window)
+                local willOpen = not popupInstance.Visible
+                if willOpen then
+                    Group:CloseActivePopup()
+                    Group.ActivePopup = popupInstance
+                    popupInstance.Visible = true
+                    popupInstance.ZIndex = Window.Frame.ZIndex + 1
+                    updatePopupPosition()
+                else
+                    popupInstance.Visible = false
+                    if Group.ActivePopup == popupInstance then
+                        Group.ActivePopup = nil
                     end
-                    if posX < 10 then posX = 10 end
-                    local posY = math.clamp(row.AbsolutePosition.Y / curScale - 10, 10, math.max(10, scrH / curScale - 300))
-                    popupInstance.Position = UDim2.new(0, posX, 0, posY)
                 end
             end)
+
+            table.insert(Window.PopupUpdateFuncs, updatePopupPosition)
 
             local ToggleObj = {
                 Popup = popupInstance,
@@ -615,6 +762,134 @@ function MegaHackLib:CreateGroup(options)
         end
 
         -------------------------------------------------------------
+        -- ELEMENT 2B: SETTINGS ONLY (Non-toggle row with triangle '◢' only)
+        -------------------------------------------------------------
+        function Window:AddSettingsOnly(opt)
+            opt = opt or {}
+            local name = opt.Name or "Settings"
+            local buildSettings = opt.BuildSettings or function(p) end
+
+            local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
+
+            local row = Instance.new("Frame")
+            row.Name = name .. "_SettingsOnlyRow"
+            row.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
+            row.BorderSizePixel = 0
+            row.ZIndex = (parentBody == Body) and 10 or 503
+            row.Parent = parentBody
+
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(1, 0, 1, 0)
+            btn.BackgroundTransparency = 1
+            btn.Text = ""
+            btn.Active = false
+            btn.Selectable = false
+            btn.ZIndex = row.ZIndex + 1
+            btn.Parent = row
+
+            local lbl = Instance.new("TextLabel")
+            lbl.Size = UDim2.new(1, -30, 1, 0)
+            lbl.Position = UDim2.new(0, 6, 0, 0)
+            lbl.BackgroundTransparency = 1
+            lbl.FontFace = THEME.FontFace
+            lbl.Text = name
+            lbl.TextSize = THEME.TextSize
+            lbl.TextColor3 = (isPopup and POPUP_TEXT or THEME.TextDisabled)
+            lbl.TextXAlignment = Enum.TextXAlignment.Left
+            lbl.TextTruncate = Enum.TextTruncate.AtEnd
+            lbl.ZIndex = btn.ZIndex + 1
+            lbl.Parent = btn
+
+            local arrowBtn = Instance.new("TextButton")
+            arrowBtn.Name = "ArrowBtn"
+            arrowBtn.Size = UDim2.new(0, 24, 1, 0)
+            arrowBtn.Position = UDim2.new(1, -24, 0, 0)
+            arrowBtn.BackgroundTransparency = 1
+            arrowBtn.Text = "◢"
+            arrowBtn.Font = Enum.Font.SourceSans
+            arrowBtn.TextSize = 9
+            arrowBtn.TextColor3 = (isPopup and POPUP_TEXT or THEME.IndicatorDisabled)
+            arrowBtn.Active = false
+            arrowBtn.Selectable = false
+            arrowBtn.ZIndex = btn.ZIndex + 1
+            arrowBtn.Parent = row
+
+            local popupInstance = createSettingsPopup(name, buildSettings, row)
+
+            btn.MouseEnter:Connect(function()
+                row.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg)
+                lbl.TextColor3 = THEME.TextActive
+                arrowBtn.TextColor3 = THEME.TextActive
+            end)
+            btn.MouseLeave:Connect(function()
+                row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
+                lbl.TextColor3 = (isPopup and POPUP_TEXT or THEME.TextDisabled)
+                arrowBtn.TextColor3 = (isPopup and POPUP_TEXT or THEME.IndicatorDisabled)
+            end)
+
+            local function updatePopupPosition()
+                if not popupInstance.Visible then return end
+                local curScale = Group:GetScale()
+                local cam = workspace.CurrentCamera
+                local scrW = cam and cam.ViewportSize.X or 1920
+                local scrH = cam and cam.ViewportSize.Y or 1080
+                
+                local popupW = 185
+                local guiAbs = ScreenGui.AbsolutePosition
+                local windowRightEdge = (Frame.AbsolutePosition.X - guiAbs.X + Frame.AbsoluteSize.X) / curScale
+                local windowLeftEdge = (Frame.AbsolutePosition.X - guiAbs.X) / curScale
+                
+                local posX = windowRightEdge
+                if (posX + popupW) * curScale > scrW - 10 then
+                    posX = windowLeftEdge - popupW
+                end
+                if posX < 5 then posX = 5 end
+                
+                local rowAbsY = (row.AbsolutePosition.Y - guiAbs.Y) / curScale
+                local posY = rowAbsY
+                local popupH = popupInstance.AbsoluteSize.Y / curScale
+                if popupH == 0 then
+                    popupH = popupInstance.Size.Y.Offset
+                end
+                if (posY + popupH) * curScale > scrH - 10 then
+                    posY = math.max(5, (scrH / curScale) - popupH - 10)
+                end
+                popupInstance.Position = UDim2.new(0, posX, 0, posY)
+            end
+
+            btn.MouseButton1Click:Connect(function()
+                Group:BringToFront(Window)
+                local willOpen = not popupInstance.Visible
+                if willOpen then
+                    Group:CloseActivePopup()
+                    Group.ActivePopup = popupInstance
+                    popupInstance.Visible = true
+                    updatePopupPosition()
+                else
+                    popupInstance.Visible = false
+                    if Group.ActivePopup == popupInstance then
+                        Group.ActivePopup = nil
+                    end
+                end
+            end)
+
+            table.insert(Window.PopupUpdateFuncs, updatePopupPosition)
+
+            local SettingsObj = {
+                Popup = popupInstance,
+            }
+            function SettingsObj:OpenSettings()
+                popupInstance.Visible = true
+            end
+            function SettingsObj:CloseSettings()
+                popupInstance.Visible = false
+            end
+            return SettingsObj
+        end
+
+        -------------------------------------------------------------
         -- ELEMENT 3: BUTTON (Bracket Style [ Button ])
         -------------------------------------------------------------
         function Window:AddButton(opt)
@@ -623,16 +898,17 @@ function MegaHackLib:CreateGroup(options)
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local btn = Instance.new("TextButton")
             btn.Name = name
             btn.Size = UDim2.new(1, -8, 0, THEME.RowHeight - 2)
             btn.Position = UDim2.new(0, 4, 0, 1)
-            btn.BackgroundColor3 = THEME.ItemNormalBg
+            btn.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             btn.BorderSizePixel = 0
             btn.AutoButtonColor = false
             btn.Text = name
-            btn.Font = THEME.Font
+            btn.FontFace = THEME.FontFace
             btn.TextSize = THEME.TextSize
             btn.TextColor3 = THEME.TextActive
             btn.Active = false
@@ -640,29 +916,30 @@ function MegaHackLib:CreateGroup(options)
             btn.ZIndex = (parentBody == Body) and 10 or 503
             btn.Parent = parentBody
 
-            -- Left vertical pink bracket line
-            local leftLine = Instance.new("Frame")
-            leftLine.Size = UDim2.new(0, 2, 1, -4)
-            leftLine.Position = UDim2.new(0, 2, 0, 2)
-            leftLine.BackgroundColor3 = THEME.ButtonAccentLine
-            leftLine.BorderSizePixel = 0
-            leftLine.ZIndex = btn.ZIndex + 1
-            leftLine.Parent = btn
+            -- Optional vertical bracket lines (if opt.Brackets == true)
+            if opt.Brackets then
+                local leftLine = Instance.new("Frame")
+                leftLine.Size = UDim2.new(0, 2, 1, -4)
+                leftLine.Position = UDim2.new(0, 2, 0, 2)
+                leftLine.BackgroundColor3 = THEME.ButtonAccentLine
+                leftLine.BorderSizePixel = 0
+                leftLine.ZIndex = btn.ZIndex + 1
+                leftLine.Parent = btn
 
-            -- Right vertical pink bracket line
-            local rightLine = Instance.new("Frame")
-            rightLine.Size = UDim2.new(0, 2, 1, -4)
-            rightLine.Position = UDim2.new(1, -4, 0, 2)
-            rightLine.BackgroundColor3 = THEME.ButtonAccentLine
-            rightLine.BorderSizePixel = 0
-            rightLine.ZIndex = btn.ZIndex + 1
-            rightLine.Parent = btn
+                local rightLine = Instance.new("Frame")
+                rightLine.Size = UDim2.new(0, 2, 1, -4)
+                rightLine.Position = UDim2.new(1, -4, 0, 2)
+                rightLine.BackgroundColor3 = THEME.ButtonAccentLine
+                rightLine.BorderSizePixel = 0
+                rightLine.ZIndex = btn.ZIndex + 1
+                rightLine.Parent = btn
+            end
 
-            btn.MouseEnter:Connect(function() btn.BackgroundColor3 = THEME.ItemHoverBg end)
-            btn.MouseLeave:Connect(function() btn.BackgroundColor3 = THEME.ItemNormalBg end)
+            btn.MouseEnter:Connect(function() btn.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+            btn.MouseLeave:Connect(function() btn.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
             btn.MouseButton1Click:Connect(function()
                 btn.BackgroundColor3 = THEME.ItemActiveFlash
-                task.delay(0.08, function() btn.BackgroundColor3 = THEME.ItemHoverBg end)
+                task.delay(0.08, function() btn.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
                 callback()
             end)
         end
@@ -681,12 +958,13 @@ function MegaHackLib:CreateGroup(options)
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
             local curVal = default
 
             local row = Instance.new("Frame")
             row.Name = name .. "_SliderRow"
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight + 3)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
@@ -695,10 +973,10 @@ function MegaHackLib:CreateGroup(options)
             lbl.Size = UDim2.new(0.65, -6, 1, -5)
             lbl.Position = UDim2.new(0, 6, 0, 0)
             lbl.BackgroundTransparency = 1
-            lbl.Font = THEME.Font
+            lbl.FontFace = THEME.FontFace
             lbl.Text = name
             lbl.TextSize = THEME.TextSize
-            lbl.TextColor3 = THEME.TextDisabled
+            lbl.TextColor3 = (isPopup and POPUP_TEXT or THEME.TextDisabled)
             lbl.TextXAlignment = Enum.TextXAlignment.Left
             lbl.ZIndex = row.ZIndex + 1
             lbl.Parent = row
@@ -707,7 +985,7 @@ function MegaHackLib:CreateGroup(options)
             valLbl.Size = UDim2.new(0.35, -8, 1, -5)
             valLbl.Position = UDim2.new(0.65, 0, 0, 0)
             valLbl.BackgroundTransparency = 1
-            valLbl.Font = THEME.Font
+            valLbl.FontFace = THEME.FontFace
             valLbl.Text = string.format("%." .. decimals .. "f%s", curVal, suffix)
             valLbl.TextSize = THEME.TextSize - 1
             valLbl.TextColor3 = THEME.TextActive
@@ -767,8 +1045,8 @@ function MegaHackLib:CreateGroup(options)
                 end
             end)
 
-            row.MouseEnter:Connect(function() row.BackgroundColor3 = THEME.ItemHoverBg end)
-            row.MouseLeave:Connect(function() row.BackgroundColor3 = THEME.ItemNormalBg end)
+            row.MouseEnter:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+            row.MouseLeave:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
 
             local SliderObj = {}
             function SliderObj:Set(v)
@@ -794,22 +1072,26 @@ function MegaHackLib:CreateGroup(options)
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local row = Instance.new("Frame")
             row.Name = name .. "_InputRow"
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
+
+            local isNumeric = opt.Numeric ~= false -- Default true for numbers unless explicitly set false
+            local suffix = opt.Suffix or ""
 
             local valBox = Instance.new("TextBox")
             valBox.Size = UDim2.new(0.34, -4, 1, -4)
             valBox.Position = UDim2.new(0, 4, 0, 2)
             valBox.BackgroundColor3 = THEME.FrameBg
             valBox.BorderSizePixel = 0
-            valBox.Text = default
-            valBox.Font = THEME.Font
+            valBox.Text = default .. suffix
+            valBox.FontFace = THEME.FontFace
             valBox.TextSize = THEME.TextSize - 1
             valBox.TextColor3 = THEME.TextActive
             valBox.ClearTextOnFocus = false
@@ -821,28 +1103,77 @@ function MegaHackLib:CreateGroup(options)
             lbl.Size = UDim2.new(0.66, -4, 1, 0)
             lbl.Position = UDim2.new(0.34, 4, 0, 0)
             lbl.BackgroundTransparency = 1
-            lbl.Font = THEME.Font
+            lbl.FontFace = THEME.FontFace
             lbl.Text = name
             lbl.TextSize = THEME.TextSize
-            lbl.TextColor3 = THEME.TextDisabled
+            lbl.TextColor3 = (isPopup and POPUP_TEXT or THEME.TextDisabled)
             lbl.TextXAlignment = Enum.TextXAlignment.Left
             lbl.ZIndex = row.ZIndex + 1
             lbl.Parent = row
 
-            valBox.FocusLost:Connect(function()
-                callback(valBox.Text)
+            -- Real-time filtering and suffix retention (suffix is ALWAYS visible)
+            local isUpdatingText = false
+            valBox:GetPropertyChangedSignal("Text"):Connect(function()
+                if isUpdatingText then return end
+                isUpdatingText = true
+
+                local raw = valBox.Text
+
+                if isNumeric then
+                    -- Strip suffix if present to get clean user input
+                    if suffix ~= "" and raw:sub(-#suffix) == suffix then
+                        raw = raw:sub(1, -#suffix - 1)
+                    end
+
+                    -- Filter out any non-numeric characters except digits, minus, and decimal dot
+                    local filtered = raw:gsub("[^%d%.%-]", "")
+                    local parts = string.split(filtered, ".")
+                    if #parts > 2 then
+                        filtered = parts[1] .. "." .. table.concat(parts, "", 2)
+                    end
+
+                    -- Re-attach suffix immediately if focused/editing so it never disappears!
+                    if suffix ~= "" then
+                        valBox.Text = filtered .. suffix
+                        -- Keep cursor right before suffix
+                        valBox.CursorPosition = #filtered + 1
+                    else
+                        valBox.Text = filtered
+                    end
+                end
+
+                isUpdatingText = false
             end)
 
-            row.MouseEnter:Connect(function() row.BackgroundColor3 = THEME.ItemHoverBg end)
-            row.MouseLeave:Connect(function() row.BackgroundColor3 = THEME.ItemNormalBg end)
+            valBox.FocusLost:Connect(function()
+                local text = valBox.Text
+                if isNumeric then
+                    if suffix ~= "" and text:sub(-#suffix) == suffix then
+                        text = text:sub(1, -#suffix - 1)
+                    end
+                    local clean = text:gsub("[^%d%.%-]", "")
+                    if clean == "" or clean == "-" or clean == "." then clean = default end
+                    valBox.Text = clean .. suffix
+                    callback(clean)
+                else
+                    callback(text)
+                end
+            end)
+
+            row.MouseEnter:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+            row.MouseLeave:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
 
             local InputObj = {}
             function InputObj:Set(val)
-                valBox.Text = tostring(val)
-                callback(valBox.Text)
+                valBox.Text = tostring(val) .. suffix
+                callback(tostring(val))
             end
             function InputObj:Get()
-                return valBox.Text
+                local txt = valBox.Text
+                if suffix ~= "" and txt:sub(-#suffix) == suffix then
+                    return txt:sub(1, -#suffix - 1)
+                end
+                return txt
             end
             return InputObj
         end
@@ -856,14 +1187,16 @@ function MegaHackLib:CreateGroup(options)
             local val = tostring(opt.DefaultValue or "0.50")
             local state = opt.DefaultState or false
             local suffix = opt.Suffix or ""
+            local isNumeric = opt.Numeric ~= false
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local row = Instance.new("Frame")
             row.Name = name .. "_FloatToggle"
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
@@ -874,7 +1207,7 @@ function MegaHackLib:CreateGroup(options)
             valBox.BackgroundColor3 = THEME.FrameBg
             valBox.BorderSizePixel = 0
             valBox.Text = val .. suffix
-            valBox.Font = THEME.Font
+            valBox.FontFace = THEME.FontFace
             valBox.TextSize = THEME.TextSize - 1
             valBox.TextColor3 = THEME.TextActive
             valBox.ClearTextOnFocus = false
@@ -896,10 +1229,10 @@ function MegaHackLib:CreateGroup(options)
             lbl.Size = UDim2.new(1, -12, 1, 0)
             lbl.Position = UDim2.new(0, 2, 0, 0)
             lbl.BackgroundTransparency = 1
-            lbl.Font = THEME.Font
+            lbl.FontFace = THEME.FontFace
             lbl.Text = name
             lbl.TextSize = THEME.TextSize
-            lbl.TextColor3 = state and THEME.TextActive or THEME.TextDisabled
+            lbl.TextColor3 = isPopup and POPUP_TEXT or (state and THEME.TextActive or THEME.TextDisabled)
             lbl.TextXAlignment = Enum.TextXAlignment.Left
             lbl.TextTruncate = Enum.TextTruncate.AtEnd
             lbl.ZIndex = tBtn.ZIndex + 1
@@ -914,22 +1247,61 @@ function MegaHackLib:CreateGroup(options)
             bar.Parent = tBtn
 
             local function refresh()
-                lbl.TextColor3 = state and THEME.TextActive or THEME.TextDisabled
+                lbl.TextColor3 = isPopup and POPUP_TEXT or (state and THEME.TextActive or THEME.TextDisabled)
                 bar.BackgroundColor3 = state and THEME.IndicatorActive or THEME.IndicatorDisabled
             end
+
+            -- Filtering and suffix retention for FloatToggle (suffix ALWAYS visible)
+            local isUpdatingFloatText = false
+            valBox:GetPropertyChangedSignal("Text"):Connect(function()
+                if isUpdatingFloatText then return end
+                isUpdatingFloatText = true
+
+                local raw = valBox.Text
+
+                if isNumeric then
+                    if suffix ~= "" and raw:sub(-#suffix) == suffix then
+                        raw = raw:sub(1, -#suffix - 1)
+                    end
+                    local filtered = raw:gsub("[^%d%.%-]", "")
+                    local parts = string.split(filtered, ".")
+                    if #parts > 2 then
+                        filtered = parts[1] .. "." .. table.concat(parts, "", 2)
+                    end
+                    if suffix ~= "" then
+                        valBox.Text = filtered .. suffix
+                        valBox.CursorPosition = #filtered + 1
+                    else
+                        valBox.Text = filtered
+                    end
+                end
+
+                isUpdatingFloatText = false
+            end)
 
             tBtn.MouseButton1Click:Connect(function()
                 state = not state
                 refresh()
-                callback(valBox.Text, state)
+                local rawVal = valBox.Text
+                if suffix ~= "" and rawVal:sub(-#suffix) == suffix then
+                    rawVal = rawVal:sub(1, -#suffix - 1)
+                end
+                callback(rawVal, state)
             end)
 
             valBox.FocusLost:Connect(function()
-                callback(valBox.Text, state)
+                local text = valBox.Text
+                local clean = text
+                if isNumeric then
+                    clean = text:gsub("[^%d%.%-]", "")
+                    if clean == "" or clean == "-" or clean == "." then clean = val end
+                    valBox.Text = clean .. suffix
+                end
+                callback(clean, state)
             end)
 
-            row.MouseEnter:Connect(function() row.BackgroundColor3 = THEME.ItemHoverBg end)
-            row.MouseLeave:Connect(function() row.BackgroundColor3 = THEME.ItemNormalBg end)
+            row.MouseEnter:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+            row.MouseLeave:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
 
             local FloatToggleObj = {}
             function FloatToggleObj:Set(newVal, newState)
@@ -951,11 +1323,12 @@ function MegaHackLib:CreateGroup(options)
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local row = Instance.new("Frame")
             row.Name = name .. "_Combo"
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
@@ -966,7 +1339,7 @@ function MegaHackLib:CreateGroup(options)
             comboBtn.BackgroundColor3 = THEME.FrameBg
             comboBtn.BorderSizePixel = 0
             comboBtn.Text = current .. " ▼"
-            comboBtn.Font = THEME.Font
+            comboBtn.FontFace = THEME.FontFace
             comboBtn.TextSize = THEME.TextSize - 1
             comboBtn.TextColor3 = THEME.TextActive
             comboBtn.TextTruncate = Enum.TextTruncate.AtEnd
@@ -979,10 +1352,10 @@ function MegaHackLib:CreateGroup(options)
             lbl.Size = UDim2.new(0.52, -4, 1, 0)
             lbl.Position = UDim2.new(0.48, 4, 0, 0)
             lbl.BackgroundTransparency = 1
-            lbl.Font = THEME.Font
+            lbl.FontFace = THEME.FontFace
             lbl.Text = name
             lbl.TextSize = THEME.TextSize
-            lbl.TextColor3 = THEME.TextDisabled
+            lbl.TextColor3 = (isPopup and POPUP_TEXT or THEME.TextDisabled)
             lbl.TextXAlignment = Enum.TextXAlignment.Left
             lbl.ZIndex = row.ZIndex + 1
             lbl.Parent = row
@@ -991,8 +1364,7 @@ function MegaHackLib:CreateGroup(options)
             local dropList = Instance.new("ScrollingFrame")
             dropList.Name = name .. "_DropList"
             dropList.BackgroundColor3 = THEME.FrameBg
-            dropList.BorderSizePixel = 1
-            dropList.BorderColor3 = THEME.WindowBorder
+            dropList.BorderSizePixel = 0
             dropList.ScrollBarThickness = 0
             dropList.ScrollBarImageTransparency = 1
             dropList.ScrollBarImageColor3 = THEME.ScrollBarThumb
@@ -1017,7 +1389,7 @@ function MegaHackLib:CreateGroup(options)
                 oBtn.BackgroundColor3 = THEME.FrameBg
                 oBtn.BorderSizePixel = 0
                 oBtn.Text = "  " .. optionName
-                oBtn.Font = THEME.Font
+                oBtn.FontFace = THEME.FontFace
                 oBtn.TextSize = THEME.TextSize - 1
                 oBtn.TextColor3 = (optionName == current) and THEME.TitleBg or THEME.TextActive
                 oBtn.TextXAlignment = Enum.TextXAlignment.Left
@@ -1026,12 +1398,12 @@ function MegaHackLib:CreateGroup(options)
                 oBtn.ZIndex = 3501
                 oBtn.Parent = dropList
 
-                oBtn.MouseEnter:Connect(function() oBtn.BackgroundColor3 = THEME.ItemHoverBg end)
+                oBtn.MouseEnter:Connect(function() oBtn.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
                 oBtn.MouseLeave:Connect(function() oBtn.BackgroundColor3 = THEME.FrameBg end)
 
                 oBtn.MouseButton1Click:Connect(function()
                     current = optionName
-                    comboBtn.Text = current .. " ▼"
+            comboBtn.Text = current .. " ▼"
                     dropList.Visible = false
                     if Group.ActiveDropdown == dropList then
                         Group.ActiveDropdown = nil
@@ -1046,11 +1418,13 @@ function MegaHackLib:CreateGroup(options)
             end
 
             local function updateDropPosition()
+                if not dropList.Visible then return end
                 local curScale = Group:GetScale()
                 local absPos = comboBtn.AbsolutePosition
                 local absSize = comboBtn.AbsoluteSize
-                local posX = absPos.X / curScale
-                local posY = (absPos.Y + absSize.Y + 2) / curScale
+                local guiAbs = ScreenGui.AbsolutePosition
+                local posX = (absPos.X - guiAbs.X) / curScale
+                local posY = (absPos.Y - guiAbs.Y + absSize.Y + 2) / curScale
                 local itemH = THEME.RowHeight
                 local totalH = #optionsList * itemH
                 local fitH = math.min(totalH, 180)
@@ -1058,6 +1432,13 @@ function MegaHackLib:CreateGroup(options)
                 dropList.CanvasSize = UDim2.new(0, 0, 0, totalH)
                 dropList.Position = UDim2.new(0, posX, 0, posY)
             end
+
+            -- Keep the floating list attached while its window, popup, or scroll
+            -- container moves. AbsolutePosition also covers dropdowns nested in
+            -- a settings popup after that popup follows its parent window.
+            table.insert(Window.PopupUpdateFuncs, updateDropPosition)
+            comboBtn:GetPropertyChangedSignal("AbsolutePosition"):Connect(updateDropPosition)
+            comboBtn:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateDropPosition)
 
             comboBtn.MouseButton1Click:Connect(function()
                 local willOpen = not dropList.Visible
@@ -1093,15 +1474,15 @@ function MegaHackLib:CreateGroup(options)
                 end
             end)
 
-            row.MouseEnter:Connect(function() row.BackgroundColor3 = THEME.ItemHoverBg end)
-            row.MouseLeave:Connect(function() row.BackgroundColor3 = THEME.ItemNormalBg end)
+            row.MouseEnter:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+            row.MouseLeave:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
 
             local DropdownObj = {
                 DropList = dropList,
             }
             function DropdownObj:Set(opt)
                 current = opt
-                comboBtn.Text = current .. " ▼"
+            comboBtn.Text = current .. " ▼"
                 for _, b in pairs(optionButtons) do
                     b.btn.TextColor3 = (b.name == current) and THEME.TitleBg or THEME.TextActive
                 end
@@ -1114,7 +1495,7 @@ function MegaHackLib:CreateGroup(options)
         end
 
         -------------------------------------------------------------
-        -- ELEMENT 8: RADIO GROUP (● Green dot bullet)
+        -- ELEMENT 8: RADIO GROUP (â— Green dot bullet)
         -------------------------------------------------------------
         function Window:AddRadioGroup(opt)
             opt = opt or {}
@@ -1123,13 +1504,14 @@ function MegaHackLib:CreateGroup(options)
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
             local radioButtons = {}
 
             for _, optionName in ipairs(optionsList) do
                 local btn = Instance.new("TextButton")
                 btn.Name = optionName .. "_Radio"
                 btn.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-                btn.BackgroundColor3 = THEME.ItemNormalBg
+                btn.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
                 btn.BorderSizePixel = 0
                 btn.AutoButtonColor = false
                 btn.Text = ""
@@ -1157,10 +1539,10 @@ function MegaHackLib:CreateGroup(options)
                 lbl.Size = UDim2.new(1, -26, 1, 0)
                 lbl.Position = UDim2.new(0, 24, 0, 0)
                 lbl.BackgroundTransparency = 1
-                lbl.Font = THEME.Font
+                lbl.FontFace = THEME.FontFace
                 lbl.Text = optionName
                 lbl.TextSize = THEME.TextSize
-                lbl.TextColor3 = isSelected and THEME.TextActive or THEME.TextDisabled
+                lbl.TextColor3 = isSelected and THEME.TextActive or (isPopup and POPUP_TEXT or THEME.TextDisabled)
                 lbl.TextXAlignment = Enum.TextXAlignment.Left
                 lbl.ZIndex = btn.ZIndex + 1
                 lbl.Parent = btn
@@ -1173,13 +1555,13 @@ function MegaHackLib:CreateGroup(options)
                         local sel = (name == current)
                         r.dot.BackgroundColor3 = sel and THEME.RadioGreen or Color3.fromRGB(30, 30, 30)
                         r.dot.BorderColor3 = sel and THEME.RadioGreen or Color3.fromRGB(100, 100, 100)
-                        r.lbl.TextColor3 = sel and THEME.TextActive or THEME.TextDisabled
+                        r.lbl.TextColor3 = sel and THEME.TextActive or (isPopup and POPUP_TEXT or THEME.TextDisabled)
                     end
                     callback(current)
                 end)
 
-                btn.MouseEnter:Connect(function() btn.BackgroundColor3 = THEME.ItemHoverBg end)
-                btn.MouseLeave:Connect(function() btn.BackgroundColor3 = THEME.ItemNormalBg end)
+                btn.MouseEnter:Connect(function() btn.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+                btn.MouseLeave:Connect(function() btn.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
             end
         end
 
@@ -1193,12 +1575,13 @@ function MegaHackLib:CreateGroup(options)
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
             local listening = false
 
             local row = Instance.new("Frame")
             row.Name = name .. "_KeybindRow"
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
@@ -1207,7 +1590,7 @@ function MegaHackLib:CreateGroup(options)
             lbl.Size = UDim2.new(0.55, -4, 1, 0)
             lbl.Position = UDim2.new(0, 6, 0, 0)
             lbl.BackgroundTransparency = 1
-            lbl.Font = THEME.Font
+            lbl.FontFace = THEME.FontFace
             lbl.Text = name
             lbl.TextSize = THEME.TextSize
             lbl.TextColor3 = THEME.TextActive
@@ -1221,7 +1604,7 @@ function MegaHackLib:CreateGroup(options)
             keyBtn.BackgroundColor3 = THEME.FrameBg
             keyBtn.BorderSizePixel = 0
             keyBtn.Text = currentKey and currentKey.Name or "-"
-            keyBtn.Font = THEME.Font
+            keyBtn.FontFace = THEME.FontFace
             keyBtn.TextSize = THEME.TextSize - 1
             keyBtn.TextColor3 = THEME.TextActive
             keyBtn.Active = false
@@ -1234,7 +1617,7 @@ function MegaHackLib:CreateGroup(options)
             delBtn.Position = UDim2.new(0.88, 0, 0, 2)
             delBtn.BackgroundTransparency = 1
             delBtn.Text = "X"
-            delBtn.Font = THEME.Font
+            delBtn.FontFace = THEME.FontFace
             delBtn.TextSize = THEME.TextSize - 1
             delBtn.TextColor3 = THEME.TextDisabled
             delBtn.Active = false
@@ -1267,8 +1650,8 @@ function MegaHackLib:CreateGroup(options)
                 end
             end)
 
-            row.MouseEnter:Connect(function() row.BackgroundColor3 = THEME.ItemHoverBg end)
-            row.MouseLeave:Connect(function() row.BackgroundColor3 = THEME.ItemNormalBg end)
+            row.MouseEnter:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+            row.MouseLeave:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
         end
 
         -------------------------------------------------------------
@@ -1281,36 +1664,38 @@ function MegaHackLib:CreateGroup(options)
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local row = Instance.new("Frame")
             row.Name = name .. "_ColorRow"
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
 
-            -- Swatch button on the row
+            -- Swatch button on the row (right side, matching MegaHack)
             local swatch = Instance.new("TextButton")
-            swatch.Size = UDim2.new(0, 18, 0, 14)
-            swatch.Position = UDim2.new(0, 6, 0.5, -7)
+            swatch.Size = UDim2.new(0, 14, 0, 14)
+            swatch.Position = UDim2.new(1, -20, 0.5, -7)
             swatch.BackgroundColor3 = curColor
             swatch.BorderSizePixel = 1
             swatch.BorderColor3 = Color3.fromRGB(220, 220, 220)
             swatch.Text = ""
+            swatch.AutoButtonColor = false
             swatch.Active = false
             swatch.Selectable = false
             swatch.ZIndex = row.ZIndex + 1
             swatch.Parent = row
 
             local lbl = Instance.new("TextLabel")
-            lbl.Size = UDim2.new(1, -32, 1, 0)
-            lbl.Position = UDim2.new(0, 30, 0, 0)
+            lbl.Size = UDim2.new(1, -26, 1, 0)
+            lbl.Position = UDim2.new(0, 6, 0, 0)
             lbl.BackgroundTransparency = 1
-            lbl.Font = THEME.Font
+            lbl.FontFace = THEME.FontFace
             lbl.Text = name
             lbl.TextSize = THEME.TextSize
-            lbl.TextColor3 = THEME.TextDisabled
+            lbl.TextColor3 = (isPopup and POPUP_TEXT or THEME.TextDisabled)
             lbl.TextXAlignment = Enum.TextXAlignment.Left
             lbl.ZIndex = row.ZIndex + 1
             lbl.Parent = row
@@ -1318,162 +1703,87 @@ function MegaHackLib:CreateGroup(options)
             ---------------------------------------------------------
             -- Dedicated Floating Color Picker Popup Window
             ---------------------------------------------------------
-            local cpWidth = 220
+            local cpWidth = 185
+            local cpHeight = 124
             local colorPopup = Instance.new("Frame")
             colorPopup.Name = name .. "_ColorPickerPopup"
-            colorPopup.Size = UDim2.new(0, cpWidth, 0, 235)
-            colorPopup.BackgroundColor3 = THEME.WindowBorder
+            colorPopup.Size = UDim2.new(0, cpWidth, 0, cpHeight)
+            colorPopup.BackgroundColor3 = POPUP_BG
             colorPopup.BorderSizePixel = 1
-            colorPopup.BorderColor3 = THEME.WindowBorder
-            colorPopup.ZIndex = 3000
+            colorPopup.BorderColor3 = Color3.fromRGB(0, 0, 0)
+            colorPopup.ZIndex = Frame.ZIndex + 1
             colorPopup.Visible = false
             colorPopup.Parent = ScreenGui
 
-            -- Header
-            local cpHeader = Instance.new("Frame")
-            cpHeader.Size = UDim2.new(1, 0, 0, THEME.HeaderHeight)
-            cpHeader.BackgroundColor3 = THEME.TitleBg
-            cpHeader.BorderSizePixel = 0
-            cpHeader.ZIndex = 3001
-            cpHeader.Parent = colorPopup
-
-            local cpTitle = Instance.new("TextLabel")
-            cpTitle.Size = UDim2.new(1, -26, 1, 0)
-            cpTitle.Position = UDim2.new(0, 8, 0, 0)
-            cpTitle.BackgroundTransparency = 1
-            cpTitle.Font = THEME.FontBold
-            cpTitle.Text = name .. " Picker"
-            cpTitle.TextSize = THEME.HeaderSize - 1
-            cpTitle.TextColor3 = THEME.TitleText
-            cpTitle.TextXAlignment = Enum.TextXAlignment.Left
-            cpTitle.ZIndex = 3002
-            cpTitle.Parent = cpHeader
-
-            local cpCloseBtn = Instance.new("TextButton")
-            cpCloseBtn.Size = UDim2.new(0, 20, 1, 0)
-            cpCloseBtn.Position = UDim2.new(1, -22, 0, 0)
-            cpCloseBtn.BackgroundTransparency = 1
-            cpCloseBtn.Text = "X"
-            cpCloseBtn.Font = THEME.FontBold
-            cpCloseBtn.TextSize = 12
-            cpCloseBtn.TextColor3 = THEME.TitleText
-            cpCloseBtn.Active = false
-            cpCloseBtn.Selectable = false
-            cpCloseBtn.ZIndex = 3002
-            cpCloseBtn.Parent = cpHeader
-
-            makeDraggable(cpHeader, colorPopup, function() return Group:GetScale() end)
-
-            -- Body Container
+            -- Headerless body
             local cpBody = Instance.new("Frame")
-            cpBody.Position = UDim2.new(0, 0, 0, THEME.HeaderHeight)
-            cpBody.Size = UDim2.new(1, 0, 1, -THEME.HeaderHeight)
-            cpBody.BackgroundColor3 = THEME.PopupBg
+            cpBody.Position = UDim2.new(0, 0, 0, 0)
+            cpBody.Size = UDim2.new(1, 0, 1, 0)
+            cpBody.BackgroundColor3 = POPUP_BG
             cpBody.BorderSizePixel = 0
             cpBody.ZIndex = 3001
             cpBody.Parent = colorPopup
 
-            -- Preview Box with Hex code
-            local previewBox = Instance.new("Frame")
-            previewBox.Size = UDim2.new(1, -16, 0, 26)
-            previewBox.Position = UDim2.new(0, 8, 0, 8)
-            previewBox.BackgroundColor3 = curColor
-            previewBox.BorderSizePixel = 1
-            previewBox.BorderColor3 = THEME.WindowBorder
-            previewBox.ZIndex = 3002
-            previewBox.Parent = cpBody
-
-            local hexLabel = Instance.new("TextLabel")
-            hexLabel.Size = UDim2.new(1, 0, 1, 0)
-            hexLabel.BackgroundTransparency = 1
-            hexLabel.Font = THEME.FontBold
-            hexLabel.Text = "#" .. curColor:ToHex():upper()
-            hexLabel.TextSize = 12
-            hexLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-            hexLabel.TextStrokeTransparency = 0.5
-            hexLabel.ZIndex = 3003
-            hexLabel.Parent = previewBox
-
-            local rVal = math.round(curColor.R * 255)
-            local gVal = math.round(curColor.G * 255)
-            local bVal = math.round(curColor.B * 255)
-
-            local function applyColor(newColor)
-                curColor = newColor
-                swatch.BackgroundColor3 = curColor
-                previewBox.BackgroundColor3 = curColor
-                hexLabel.Text = "#" .. curColor:ToHex():upper()
-                rVal = math.round(curColor.R * 255)
-                gVal = math.round(curColor.G * 255)
-                bVal = math.round(curColor.B * 255)
-                callback(curColor)
+            -- HSV state
+            local hDeg, sPct, vPct
+            do
+                local h1, s1, v1 = curColor:ToHSV()
+                hDeg = (h1 * 360) % 360
+                sPct = s1 * 100
+                vPct = v1 * 100
             end
 
-            -- Helper to make color channel slider
-            local function makeChannelSlider(yPos, chanName, initialVal, chanColor, onValChanged)
-                local sRow = Instance.new("Frame")
-                sRow.Size = UDim2.new(1, -16, 0, 20)
-                sRow.Position = UDim2.new(0, 8, 0, yPos)
-                sRow.BackgroundTransparency = 1
-                sRow.ZIndex = 3002
-                sRow.Parent = cpBody
+            local function setGradientStops(grad, stops)
+                local pts = {}
+                for i = 1, #stops do
+                    pts[i] = ColorSequenceKeypoint.new(stops[i][1], stops[i][2])
+                end
+                grad.Color = ColorSequence.new(pts)
+            end
 
-                local sLbl = Instance.new("TextLabel")
-                sLbl.Size = UDim2.new(0, 18, 1, 0)
-                sLbl.BackgroundTransparency = 1
-                sLbl.Font = THEME.FontBold
-                sLbl.Text = chanName
-                sLbl.TextSize = 12
-                sLbl.TextColor3 = chanColor
-                sLbl.TextXAlignment = Enum.TextXAlignment.Left
-                sLbl.ZIndex = 3003
-                sLbl.Parent = sRow
+            -- Build one draggable HORIZONTAL gradient bar (stacked vertically like MegaHack)
+            local function makeBar(yPos, onChange)
+                local bar = Instance.new("TextButton")
+                bar.Size = UDim2.new(1, -10, 0, 14)
+                bar.Position = UDim2.new(0, 5, 0, yPos)
+                bar.BackgroundColor3 = Color3.fromRGB(255, 255, 255) -- Pure white so UIGradient is full brightness!
+                bar.BorderSizePixel = 1
+                bar.BorderColor3 = Color3.fromRGB(40, 40, 40)
+                bar.AutoButtonColor = false
+                bar.Text = ""
+                bar.Active = false
+                bar.Selectable = false
+                bar.ZIndex = 3002
+                bar.Parent = cpBody
 
-                local sValLbl = Instance.new("TextLabel")
-                sValLbl.Size = UDim2.new(0, 28, 1, 0)
-                sValLbl.Position = UDim2.new(1, -28, 0, 0)
-                sValLbl.BackgroundTransparency = 1
-                sValLbl.Font = THEME.Font
-                sValLbl.Text = tostring(initialVal)
-                sValLbl.TextSize = 11
-                sValLbl.TextColor3 = THEME.TextActive
-                sValLbl.TextXAlignment = Enum.TextXAlignment.Right
-                sValLbl.ZIndex = 3003
-                sValLbl.Parent = sRow
+                local grad = Instance.new("UIGradient")
+                grad.Rotation = 0 -- Horizontal gradient (left to right)
+                grad.Parent = bar
 
-                local sTrack = Instance.new("TextButton")
-                sTrack.Size = UDim2.new(1, -52, 0, 6)
-                sTrack.Position = UDim2.new(0, 20, 0.5, -3)
-                sTrack.BackgroundColor3 = THEME.FrameBg
-                sTrack.BorderSizePixel = 0
-                sTrack.Text = ""
-                sTrack.AutoButtonColor = false
-                sTrack.Active = false
-                sTrack.Selectable = false
-                sTrack.ZIndex = 3003
-                sTrack.Parent = sRow
-
-                local sFill = Instance.new("Frame")
-                sFill.Size = UDim2.new(initialVal / 255, 0, 1, 0)
-                sFill.BackgroundColor3 = chanColor
-                sFill.BorderSizePixel = 0
-                sFill.ZIndex = 3004
-                sFill.Parent = sTrack
+                local handle = Instance.new("Frame")
+                handle.Size = UDim2.new(0, 2, 1, 0)
+                handle.Position = UDim2.new(0, -1, 0, 0)
+                handle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+                handle.BorderSizePixel = 1
+                handle.BorderColor3 = Color3.fromRGB(0, 0, 0)
+                handle.ZIndex = 3004
+                handle.Parent = bar
 
                 local dragging = false
-                local function updateVal(input)
-                    local posX = input.Position.X - sTrack.AbsolutePosition.X
-                    local percent = math.clamp(posX / sTrack.AbsoluteSize.X, 0, 1)
-                    local val = math.clamp(math.round(percent * 255), 0, 255)
-                    sFill.Size = UDim2.new(percent, 0, 1, 0)
-                    sValLbl.Text = tostring(val)
-                    onValChanged(val)
+                local function frac(input)
+                    local w = math.max(1, bar.AbsoluteSize.X)
+                    return (input.Position.X - bar.AbsolutePosition.X) / w
+                end
+                local function update(input)
+                    local f = math.clamp(frac(input), 0, 1)
+                    handle.Position = UDim2.new(f, -1, 0, 0)
+                    onChange(f)
                 end
 
-                sTrack.InputBegan:Connect(function(input)
+                bar.InputBegan:Connect(function(input)
                     if input.UserInputType == Enum.UserInputType.MouseButton1 then
                         dragging = true
-                        updateVal(input)
+                        update(input)
                     end
                 end)
                 UserInputService.InputEnded:Connect(function(input)
@@ -1481,148 +1791,245 @@ function MegaHackLib:CreateGroup(options)
                 end)
                 UserInputService.InputChanged:Connect(function(input)
                     if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-                        updateVal(input)
+                        update(input)
                     end
                 end)
 
                 return {
-                    Set = function(val)
-                        sFill.Size = UDim2.new(math.clamp(val / 255, 0, 1), 0, 1, 0)
-                        sValLbl.Text = tostring(math.round(val))
-                    end
+                    Bar = bar, Gradient = grad, Handle = handle,
+                    Move = function(_, f) handle.Position = UDim2.new(math.clamp(f, 0, 1), -1, 0, 0) end,
+                    SetStops = function(_, stops) setGradientStops(grad, stops) end,
                 }
             end
 
-            local rSlider = makeChannelSlider(40, "R", rVal, Color3.fromRGB(255, 70, 70), function(v)
-                rVal = v
-                applyColor(Color3.fromRGB(rVal, gVal, bVal))
-            end)
-            local gSlider = makeChannelSlider(65, "G", gVal, Color3.fromRGB(70, 210, 120), function(v)
-                gVal = v
-                applyColor(Color3.fromRGB(rVal, gVal, bVal))
-            end)
-            local bSlider = makeChannelSlider(90, "B", bVal, Color3.fromRGB(70, 140, 255), function(v)
-                bVal = v
-                applyColor(Color3.fromRGB(rVal, gVal, bVal))
-            end)
+            local refreshDynamic
 
-            -- Preset Color Palette (14 chips)
-            local paletteContainer = Instance.new("Frame")
-            paletteContainer.Size = UDim2.new(1, -16, 0, 48)
-            paletteContainer.Position = UDim2.new(0, 8, 0, 118)
-            paletteContainer.BackgroundTransparency = 1
-            paletteContainer.ZIndex = 3002
-            paletteContainer.Parent = cpBody
+            -- 3 Horizontal bars stacked vertically (Hue, Saturation, Value)
+            local hueBar = makeBar(5,  function(f) hDeg = math.clamp(f, 0, 1) * 360; refreshDynamic() end)
+            local satBar = makeBar(22, function(f) sPct = math.clamp(f, 0, 1) * 100; refreshDynamic() end)
+            local valBar = makeBar(39, function(f) vPct = math.clamp(f, 0, 1) * 100; refreshDynamic() end)
 
-            local pGrid = Instance.new("UIGridLayout")
-            pGrid.CellSize = UDim2.new(0, 25, 0, 18)
-            pGrid.CellPadding = UDim2.new(0, 4, 0, 4)
-            pGrid.SortOrder = Enum.SortOrder.LayoutOrder
-            pGrid.Parent = paletteContainer
-
-            local presetColors = {
-                Color3.fromRGB(235, 47, 100),  -- MegaHack Pink
-                Color3.fromRGB(255, 50, 50),   -- Red
-                Color3.fromRGB(255, 130, 0),   -- Orange
-                Color3.fromRGB(255, 215, 0),   -- Yellow
-                Color3.fromRGB(76, 194, 153),  -- Green
-                Color3.fromRGB(0, 230, 180),   -- Mint
-                Color3.fromRGB(0, 200, 255),   -- Cyan
-                Color3.fromRGB(56, 140, 255),  -- Blue
-                Color3.fromRGB(150, 70, 255),  -- Purple
-                Color3.fromRGB(255, 80, 200),  -- Magenta
-                Color3.fromRGB(255, 255, 255), -- White
-                Color3.fromRGB(160, 160, 160), -- Gray
-                Color3.fromRGB(80, 80, 80),    -- Dark Gray
-                Color3.fromRGB(24, 24, 24),    -- Black
-            }
-
-            for _, col in ipairs(presetColors) do
-                local chip = Instance.new("TextButton")
-                chip.Size = UDim2.new(1, 0, 1, 0)
-                chip.BackgroundColor3 = col
-                chip.BorderSizePixel = 1
-                chip.BorderColor3 = Color3.fromRGB(60, 60, 60)
-                chip.Text = ""
-                chip.AutoButtonColor = false
-                chip.Active = false
-                chip.Selectable = false
-                chip.ZIndex = 3003
-                chip.Parent = paletteContainer
-
-                chip.MouseButton1Click:Connect(function()
-                    applyColor(col)
-                    rSlider.Set(math.round(col.R * 255))
-                    gSlider.Set(math.round(col.G * 255))
-                    bSlider.Set(math.round(col.B * 255))
-                end)
-            end
-
-            -- Hex Input row
+            -- HEX row
             local hexRow = Instance.new("Frame")
-            hexRow.Size = UDim2.new(1, -16, 0, 22)
-            hexRow.Position = UDim2.new(0, 8, 0, 175)
+            hexRow.Size = UDim2.new(1, -10, 0, 18)
+            hexRow.Position = UDim2.new(0, 5, 0, 56)
             hexRow.BackgroundTransparency = 1
             hexRow.ZIndex = 3002
             hexRow.Parent = cpBody
 
-            local hLbl = Instance.new("TextLabel")
-            hLbl.Size = UDim2.new(0, 36, 1, 0)
-            hLbl.BackgroundTransparency = 1
-            hLbl.Font = THEME.Font
-            hLbl.Text = "HEX:"
-            hLbl.TextSize = 12
-            hLbl.TextColor3 = THEME.TextDisabled
-            hLbl.TextXAlignment = Enum.TextXAlignment.Left
-            hLbl.ZIndex = 3003
-            hLbl.Parent = hexRow
+            local hexLbl = Instance.new("TextLabel")
+            hexLbl.Size = UDim2.new(0, 48, 1, 0)
+            hexLbl.Position = UDim2.new(0, 0, 0, 0)
+            hexLbl.BackgroundTransparency = 1
+            hexLbl.FontFace = THEME.FontFaceBold
+            hexLbl.Text = "HEX #"
+            hexLbl.TextSize = 12
+            hexLbl.TextColor3 = POPUP_TEXT
+            hexLbl.TextXAlignment = Enum.TextXAlignment.Left
+            hexLbl.ZIndex = 3003
+            hexLbl.Parent = hexRow
 
-            local hBox = Instance.new("TextBox")
-            hBox.Size = UDim2.new(1, -40, 1, -2)
-            hBox.Position = UDim2.new(0, 38, 0, 1)
-            hBox.BackgroundColor3 = THEME.FrameBg
-            hBox.BorderSizePixel = 0
-            hBox.Text = curColor:ToHex():upper()
-            hBox.Font = THEME.Font
-            hBox.TextSize = 12
-            hBox.TextColor3 = THEME.TextActive
-            hBox.ClearTextOnFocus = false
-            hBox.Active = false
-            hBox.ZIndex = 3003
-            hBox.Parent = hexRow
-
-            hBox.FocusLost:Connect(function()
-                local raw = hBox.Text:gsub("#", ""):upper()
+            local hexBox = Instance.new("TextBox")
+            hexBox.Size = UDim2.new(1, -50, 1, 0)
+            hexBox.Position = UDim2.new(0, 50, 0, 0)
+            hexBox.BackgroundTransparency = 1
+            hexBox.FontFace = THEME.FontFace
+            hexBox.TextSize = 12
+            hexBox.TextColor3 = THEME.TextActive
+            hexBox.TextXAlignment = Enum.TextXAlignment.Left
+            hexBox.ClearTextOnFocus = false
+            hexBox.Active = true
+            hexBox.ZIndex = 3003
+            hexBox.Parent = hexRow
+            hexBox.FocusLost:Connect(function()
+                local raw = hexBox.Text:gsub("#", ""):gsub("%s", ""):upper()
                 if #raw == 6 then
-                    local ok, parsed = pcall(function() return Color3.fromHex(raw) end)
-                    if ok and parsed then
-                        applyColor(parsed)
-                        rSlider.Set(math.round(parsed.R * 255))
-                        gSlider.Set(math.round(parsed.G * 255))
-                        bSlider.Set(math.round(parsed.B * 255))
+                    local okP, parsed = pcall(function() return Color3.fromHex(raw) end)
+                    if okP and parsed then
+                        curColor = parsed
+                        local h1c, s1c, v1c = curColor:ToHSV()
+                        hDeg = (h1c * 360) % 360
+                        sPct = s1c * 100
+                        vPct = v1c * 100
+                        refreshDynamic()
                     end
                 end
-                hBox.Text = curColor:ToHex():upper()
             end)
 
-            cpCloseBtn.MouseButton1Click:Connect(function()
-                colorPopup.Visible = false
+            -- Helper to make dark bordered numeric cells for RGB and HSV rows
+            local function makeNumCell(parentRow, i, total, labelText, onChange)
+                local cell = Instance.new("Frame")
+                cell.Size = UDim2.new(1 / total, -2, 1, 0)
+                cell.Position = UDim2.new((i - 1) / total, ((i - 1) > 0 and 1 or 0), 0, 0)
+                cell.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+                cell.BorderSizePixel = 1
+                cell.BorderColor3 = Color3.fromRGB(36, 36, 36)
+                cell.ZIndex = 3003
+                cell.Parent = parentRow
+
+                local cellLbl = Instance.new("TextLabel")
+                cellLbl.Size = UDim2.new(0, 12, 1, 0)
+                cellLbl.Position = UDim2.new(0, 4, 0, 0)
+                cellLbl.BackgroundTransparency = 1
+                cellLbl.FontFace = THEME.FontFaceBold
+                cellLbl.Text = labelText
+                cellLbl.TextSize = 11
+                cellLbl.TextColor3 = POPUP_TEXT
+                cellLbl.TextXAlignment = Enum.TextXAlignment.Left
+                cellLbl.ZIndex = 3004
+                cellLbl.Parent = cell
+
+                local box = Instance.new("TextBox")
+                box.Size = UDim2.new(1, -16, 1, 0)
+                box.Position = UDim2.new(0, 16, 0, 0)
+                box.BackgroundTransparency = 1
+                box.FontFace = THEME.FontFace
+                box.TextSize = 11
+                box.TextColor3 = THEME.TextActive
+                box.TextXAlignment = Enum.TextXAlignment.Left
+                box.ClearTextOnFocus = false
+                box.Active = true
+                box.ZIndex = 3004
+                box.Parent = cell
+                box.FocusLost:Connect(function() onChange(box.Text) end)
+                return box
+            end
+
+            -- RGB row
+            local rgbRow = Instance.new("Frame")
+            rgbRow.Size = UDim2.new(1, -10, 0, 18)
+            rgbRow.Position = UDim2.new(0, 5, 0, 77)
+            rgbRow.BackgroundTransparency = 1
+            rgbRow.ZIndex = 3002
+            rgbRow.Parent = cpBody
+
+            local rBox, gBox, bBox
+            rBox = makeNumCell(rgbRow, 1, 3, "R", function(v)
+                local r = math.clamp(tonumber(v) or math.round(curColor.R * 255), 0, 255)
+                curColor = Color3.fromRGB(r, math.round(curColor.G * 255), math.round(curColor.B * 255))
+                local h1r, s1r, v1r = curColor:ToHSV()
+                hDeg = (h1r * 360) % 360; sPct = s1r * 100; vPct = v1r * 100
+                refreshDynamic()
             end)
+            gBox = makeNumCell(rgbRow, 2, 3, "G", function(v)
+                local g = math.clamp(tonumber(v) or math.round(curColor.G * 255), 0, 255)
+                curColor = Color3.fromRGB(math.round(curColor.R * 255), g, math.round(curColor.B * 255))
+                local h1g, s1g, v1g = curColor:ToHSV()
+                hDeg = (h1g * 360) % 360; sPct = s1g * 100; vPct = v1g * 100
+                refreshDynamic()
+            end)
+            bBox = makeNumCell(rgbRow, 3, 3, "B", function(v)
+                local b = math.clamp(tonumber(v) or math.round(curColor.B * 255), 0, 255)
+                curColor = Color3.fromRGB(math.round(curColor.R * 255), math.round(curColor.G * 255), b)
+                local h1b, s1b, v1b = curColor:ToHSV()
+                hDeg = (h1b * 360) % 360; sPct = s1b * 100; vPct = v1b * 100
+                refreshDynamic()
+            end)
+
+            -- HSV row
+            local hsvRow = Instance.new("Frame")
+            hsvRow.Size = UDim2.new(1, -10, 0, 18)
+            hsvRow.Position = UDim2.new(0, 5, 0, 98)
+            hsvRow.BackgroundTransparency = 1
+            hsvRow.ZIndex = 3002
+            hsvRow.Parent = cpBody
+
+            local hsvHBox, hsvSBox, hsvVBox
+            hsvHBox = makeNumCell(hsvRow, 1, 3, "H", function(v)
+                hDeg = (math.floor(tonumber(v) or hDeg) % 360)
+                refreshDynamic()
+            end)
+            hsvSBox = makeNumCell(hsvRow, 2, 3, "S", function(v)
+                sPct = math.clamp(tonumber(v) or sPct, 0, 100)
+                refreshDynamic()
+            end)
+            hsvVBox = makeNumCell(hsvRow, 3, 3, "V", function(v)
+                vPct = math.clamp(tonumber(v) or vPct, 0, 100)
+                refreshDynamic()
+            end)
+
+            refreshDynamic = function()
+                curColor = Color3.fromHSV(hDeg / 360, sPct / 100, vPct / 100)
+                swatch.BackgroundColor3 = curColor
+                callback(curColor)
+
+                hueBar:SetStops({
+                    { 0.00, Color3.fromRGB(255, 0, 0) },
+                    { 0.166, Color3.fromRGB(255, 255, 0) },
+                    { 0.333, Color3.fromRGB(0, 255, 0) },
+                    { 0.500, Color3.fromRGB(0, 255, 255) },
+                    { 0.666, Color3.fromRGB(0, 0, 255) },
+                    { 0.833, Color3.fromRGB(255, 0, 255) },
+                    { 1.00, Color3.fromRGB(255, 0, 0) },
+                })
+                local pureHue = Color3.fromHSV(hDeg / 360, 1, 1)
+                -- Saturation: Left is white (0%), right is pure hue (100%)
+                satBar:SetStops({ { 0, Color3.fromRGB(255, 255, 255) }, { 1, pureHue } })
+                -- Value: Left is black (0%), right is pure hue+sat (100%)
+                valBar:SetStops({ { 0, Color3.fromRGB(0, 0, 0) }, { 1, Color3.fromHSV(hDeg / 360, sPct / 100, 1) } })
+
+                hueBar:Move(hDeg / 360)
+                satBar:Move(sPct / 100)
+                valBar:Move(vPct / 100)
+
+                rBox.Text = tostring(math.round(curColor.R * 255))
+                gBox.Text = tostring(math.round(curColor.G * 255))
+                bBox.Text = tostring(math.round(curColor.B * 255))
+                hsvHBox.Text = tostring(math.floor(hDeg))
+                hsvSBox.Text = tostring(math.floor(sPct))
+                hsvVBox.Text = tostring(math.floor(vPct))
+                hexBox.Text = curColor:ToHex():upper()
+            end
+            refreshDynamic()
+
+            local function updateColorPopupPosition()
+                if not colorPopup.Visible then return end
+                local curScale = Group:GetScale()
+                local cam = workspace.CurrentCamera
+                local scrW = cam and cam.ViewportSize.X or 1920
+                local scrH = cam and cam.ViewportSize.Y or 1080
+
+                local guiAbs = ScreenGui.AbsolutePosition
+                local anchorFrame = (self and self.IsPopup and self.Frame) or Frame
+                local windowRightEdge = (anchorFrame.AbsolutePosition.X - guiAbs.X + anchorFrame.AbsoluteSize.X) / curScale
+                local windowLeftEdge = (anchorFrame.AbsolutePosition.X - guiAbs.X) / curScale
+
+                local posX = windowRightEdge
+                if (posX + cpWidth) * curScale > scrW - 10 then
+                    posX = windowLeftEdge - cpWidth
+                end
+                if posX < 5 then posX = 5 end
+
+                local rowAbsY = (row.AbsolutePosition.Y - guiAbs.Y) / curScale
+                local posY = rowAbsY
+                local popupH = colorPopup.AbsoluteSize.Y / curScale
+                if popupH == 0 then
+                    popupH = colorPopup.Size.Y.Offset
+                end
+                if (posY + popupH) * curScale > scrH - 10 then
+                    posY = math.max(5, (scrH / curScale) - popupH - 10)
+                end
+                if posY < 5 then posY = 5 end
+                colorPopup.Position = UDim2.new(0, posX, 0, posY)
+            end
+
+            table.insert(Window.PopupUpdateFuncs, updateColorPopupPosition)
+            table.insert(Window.Popups, colorPopup)
 
             local function toggleColorPicker()
-                colorPopup.Visible = not colorPopup.Visible
-                if colorPopup.Visible then
-                    local curScale = Group:GetScale()
-                    local cam = workspace.CurrentCamera
-                    local scrW = cam and cam.ViewportSize.X or 1920
-                    local scrH = cam and cam.ViewportSize.Y or 1080
-                    local posX = (Frame.AbsolutePosition.X + Frame.AbsoluteSize.X + 6) / curScale
-                    if (posX + cpWidth) * curScale > scrW - 10 then
-                        posX = (Frame.AbsolutePosition.X - cpWidth - 6) / curScale
+                Group:BringToFront(Window)
+                local willOpen = not colorPopup.Visible
+                if willOpen then
+                    Group:CloseActivePopup()
+                    Group.ActivePopup = colorPopup
+                    colorPopup.Visible = true
+                    colorPopup.ZIndex = Window.Frame.ZIndex + 1
+                    updateColorPopupPosition()
+                else
+                    colorPopup.Visible = false
+                    if Group.ActivePopup == colorPopup then
+                        Group.ActivePopup = nil
                     end
-                    if posX < 10 then posX = 10 end
-                    local posY = math.clamp(row.AbsolutePosition.Y / curScale - 10, 10, math.max(10, scrH / curScale - 240))
-                    colorPopup.Position = UDim2.new(0, posX, 0, posY)
                 end
             end
 
@@ -1633,33 +2040,43 @@ function MegaHackLib:CreateGroup(options)
             rowBtn.Size = UDim2.new(1, 0, 1, 0)
             rowBtn.BackgroundTransparency = 1
             rowBtn.Text = ""
+            rowBtn.AutoButtonColor = false
             rowBtn.Active = false
             rowBtn.Selectable = false
             rowBtn.ZIndex = row.ZIndex + 2
             rowBtn.Parent = row
             rowBtn.MouseButton1Click:Connect(toggleColorPicker)
 
-            row.MouseEnter:Connect(function() row.BackgroundColor3 = THEME.ItemHoverBg end)
-            row.MouseLeave:Connect(function() row.BackgroundColor3 = THEME.ItemNormalBg end)
+            row.MouseEnter:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_HOVER or THEME.ItemHoverBg) end)
+            row.MouseLeave:Connect(function() row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg) end)
 
             local ColorObj = {
                 Popup = colorPopup,
             }
             function ColorObj:Set(c)
-                applyColor(c)
-                rSlider.Set(math.round(c.R * 255))
-                gSlider.Set(math.round(c.G * 255))
-                bSlider.Set(math.round(c.B * 255))
-                hBox.Text = c:ToHex():upper()
+                curColor = c
+                local h1c, s1c, v1c = curColor:ToHSV()
+                hDeg = (h1c * 360) % 360
+                sPct = s1c * 100
+                vPct = v1c * 100
+                refreshDynamic()
             end
             function ColorObj:Get()
                 return curColor
             end
             function ColorObj:Open()
+                Group:BringToFront(Window)
+                Group:CloseActivePopup()
+                Group.ActivePopup = colorPopup
                 colorPopup.Visible = true
+                colorPopup.ZIndex = Window.Frame.ZIndex + 1
+                updateColorPopupPosition()
             end
             function ColorObj:Close()
                 colorPopup.Visible = false
+                if Group.ActivePopup == colorPopup then
+                    Group.ActivePopup = nil
+                end
             end
             return ColorObj
         end
@@ -1673,10 +2090,11 @@ function MegaHackLib:CreateGroup(options)
             local callback = opt.Callback or function() end
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local row = Instance.new("Frame")
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
@@ -1689,7 +2107,7 @@ function MegaHackLib:CreateGroup(options)
             box.PlaceholderText = placeholder
             box.PlaceholderColor3 = THEME.TextDisabled
             box.Text = ""
-            box.Font = THEME.Font
+            box.FontFace = THEME.FontFace
             box.TextSize = THEME.TextSize - 1
             box.TextColor3 = THEME.TextActive
             box.ClearTextOnFocus = false
@@ -1711,10 +2129,11 @@ function MegaHackLib:CreateGroup(options)
             local alignCenter = opt.Center or false
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local row = Instance.new("Frame")
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight - 3)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
@@ -1723,10 +2142,10 @@ function MegaHackLib:CreateGroup(options)
             lbl.Size = UDim2.new(1, -12, 1, 0)
             lbl.Position = UDim2.new(0, 6, 0, 0)
             lbl.BackgroundTransparency = 1
-            lbl.Font = THEME.FontBold
+            lbl.FontFace = THEME.FontFaceBold
             lbl.Text = text
             lbl.TextSize = THEME.TextSize - 1
-            lbl.TextColor3 = THEME.TextDisabled
+            lbl.TextColor3 = (isPopup and POPUP_TEXT or THEME.TextDisabled)
             lbl.TextXAlignment = alignCenter and Enum.TextXAlignment.Center or Enum.TextXAlignment.Left
             lbl.ZIndex = row.ZIndex + 1
             lbl.Parent = row
@@ -1741,10 +2160,11 @@ function MegaHackLib:CreateGroup(options)
             local rightBuilder = opt.Right
 
             local parentBody = self.Body or Body
+            local isPopup = self and self.IsPopup == true
 
             local row = Instance.new("Frame")
             row.Size = UDim2.new(1, 0, 0, THEME.RowHeight)
-            row.BackgroundColor3 = THEME.ItemNormalBg
+            row.BackgroundColor3 = (isPopup and POPUP_BG or THEME.ItemNormalBg)
             row.BorderSizePixel = 0
             row.ZIndex = (parentBody == Body) and 10 or 503
             row.Parent = parentBody
@@ -1775,3 +2195,4 @@ function MegaHackLib:CreateGroup(options)
 end
 
 return MegaHackLib
+
