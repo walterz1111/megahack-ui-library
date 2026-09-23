@@ -12,9 +12,11 @@ The UI matches the Geometry Dash MegaHack v7/v8 theme (sampled from Eclipse Menu
 - **Window Background**: Dark gray (`#292929` / RGB `41, 41, 41`), 1px black border (`#000000`).
 - **Interface Scale (`UIScale`)**: Smooth scaling of the entire interface from `0.4x` to `2.5x` with full text and element crispness.
 - **Toggle**: Text on the left (`#7D8080` when OFF, `#FFFFFF` when ON) with a 3px vertical white indicator bar on the right.
-- **Toggle With Settings (`◢`)**: Feature text on the left + interactive triangle button `◢` on the right. Clicking `◢` opens a floating, draggable **Sub-Settings Popup Window** containing sliders, toggles, dropdowns, etc.
-- **Dropdown / Combo**: Floating unclipped options list with hover effects and scroll support for large option sets.
-- **ColorPickers**: Clicking the color swatch opens a **Dedicated Color Picker Window** with RGB channel sliders (0-255), Hex input box, 14 preset palette chips, and live color preview.
+- **Toggle With Settings (`◢`)**: Feature text on the left + interactive triangle button `◢` on the right. Clicking `◢` opens a floating, draggable **Sub-Settings Popup Window** containing sliders, toggles, dropdowns, etc. Popup lives on the same layer as its parent window (window Z + 1), follows it when dragged, and uses a lighter gray (30,30,30, hover 42,42,42) with undimmed text (220,220,220).
+- **Settings Only (◢ only)**: Non-toggle row with just the triangle ◢; same popup behavior as Toggle With Settings.
+- **Dropdown / Combo**: Floating unclipped options list with hover effects and scroll support for large option sets. Positioning subtracts `ScreenGui.AbsolutePosition` to fix the 58px `IgnoreGuiInset` offset.
+- **Z-Order**: Last dragged/clicked window auto-brings to front (`Group:BringToFront`); its Settings popups follow at `Z+1`; dropdowns stay topmost at `Z+5`.
+- **ColorPickers**: Row has feature text on the left and a color swatch square on the right (matching authentic MegaHack layout). Clicking opens a dedicated **Floating HSV Color Picker Popup** (non-draggable, stays on the window layer, follows dragging/scrolling) featuring 3 vertical gradient bars for Hue (0-360°), Saturation (0-100%), and Value/Brightness (0-100%), plus editable HEX, RGB, and HSV inputs.
 - **Buttons**: Centered white text with vertical pink bracket lines on the left and right (`[ Button ]`).
 - **Sliders**: Title on left, formatted value on right (e.g. `1.50x`), draggable pink bar.
 - **Inputs**: Dark input box (`#181818`) on left, label on right.
@@ -151,6 +153,20 @@ Speedhack:OpenSettings()
 Speedhack:CloseSettings()
 ```
 
+### 5.3b. Settings Only (◢ only)
+Non-toggle row that only shows the triangle. Useful for section headers like "Noclip Limits":
+```lua
+Window:AddSettingsOnly({
+    Name = "Noclip Limits",
+    BuildSettings = function(popup)
+        popup:AddInput({ Name = "Time", Default = "30", Suffix = "s", Numeric = true, Callback = function(v) end })
+        popup:AddFloatToggle({ Name = "Only From 0", DefaultValue = "0", DefaultState = true, Callback = function(v,s) end })
+    end
+})
+```
+
+Popup styling: background `RGB 30,30,30` (hover `42,42,42`), text `RGB 220,220,220` never dims even when OFF. Popup positioning is relative to the row and auto-flips left if it would overflow the screen edge, clamped with `math.clamp`.
+
 ### 5.4. ColorPicker with Dedicated Popup Window
 Clicking the swatch square opens a dedicated, draggable Color Picker window with RGB sliders, Hex input, and 14 preset color chips.
 ```lua
@@ -169,7 +185,7 @@ AccentColor:Close()
 ```
 
 ### 5.5. Dropdown / Combo (Floating, No Clipping)
-Shows `Current ▼` on the left and title on the right. Options float over all windows and auto-scroll if there are many options.
+Shows `Current ▼` on the left and title on the right. Options float over all windows (Z + 5 above the window), auto-scroll if there are many options, and use ScreenGui.AbsolutePosition-aware positioning so they render directly under the button even with IgnoreGuiInset = true.
 ```lua
 local Dropdown = Window:AddDropdown({
     Name = "Ruleset",
@@ -273,7 +289,25 @@ Window:AddKeybind({
 })
 ```
 
-### 5.12. TextBox
+### 5.12. ColorPicker
+Row displaying feature name on the left and a color swatch square on the right. Clicking opens a dedicated floating HSV popup window with 3 vertical gradient bars, HEX box, RGB cells, and HSV cells.
+```lua
+local ColorPicker = Window:AddColorPicker({
+    Name = "Accent Color",
+    Default = Color3.fromRGB(235, 47, 100),
+    Callback = function(newColor)
+        print("Color changed to:", newColor)
+    end
+})
+
+-- Programmatic control:
+ColorPicker:Set(Color3.fromRGB(76, 194, 153))
+local curCol = ColorPicker:Get()
+ColorPicker:Open()
+ColorPicker:Close()
+```
+
+### 5.13. TextBox
 Full-width input box with placeholder.
 ```lua
 Window:AddTextBox({
@@ -284,7 +318,7 @@ Window:AddTextBox({
 })
 ```
 
-### 5.13. Section Label
+### 5.14. Section Label
 Section header or info text.
 ```lua
 Window:AddLabel({
@@ -295,7 +329,32 @@ Window:AddLabel({
 
 ---
 
-## 6. Complete Cheat Hub Template
+### 5.15. Window Z-Order API
+```lua
+-- Programmatic bring-to-front (also auto-called on header drag/click and triangle click)
+MasterUI:BringToFront(Window)
+-- Group tracks _nextZ internally; each window starts at 20,30,40... popup = Window.Frame.ZIndex + 1
+```
+
+---
+
+## 6. Changelog
+
+### v2.2 (Sep 2026)
+- **MegaHack HSV ColorPicker**:
+  - Row layout matches Geometry Dash MegaHack: label text on the left, color swatch square on the right.
+  - Floating popup window is non-draggable, anchored to the window/setting, and follows the window when dragged or scrolled.
+  - 3 vertical gradient bars (Hue 0-360°, Saturation 0-100%, Value 0-100%) with 100% full-brightness background and smooth vertical handles.
+  - Synchronized editable numeric inputs for HEX (`#RRGGBB`), RGB (`0-255`), and HSV (`H: 0-359, S: 0-100, V: 0-100`).
+  - Active popup mutual exclusion: opening a color picker closes open settings popups and vice versa.
+- Dropdown & Settings popups subtract ScreenGui.AbsolutePosition (fixes 58px IgnoreGuiInset offset).
+- Settings popups: unified gray 30,30,30 bg (hover 42,42,42), undimmed text 220,220,220; POPUP_BG / POPUP_HOVER / POPUP_TEXT constants and PopupObj.IsPopup routing.
+- Window Z-order: Group._nextZ + Group:BringToFront(window) + Window.Popups[]; popup Z = window Z + 1; dropdown Z + 5.
+- Unicode: — (2014) / ◢ (25E2) / ▼ (25BC) restored with UTF-8 no-BOM saves.
+
+---
+
+## 7. Complete Cheat Hub Template
 
 ```lua
 local Players = game:GetService("Players")
